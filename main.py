@@ -1,3 +1,5 @@
+from filesniffer.scanner import scan_path
+from filesniffer.reporter import print_report, export_json, export_csv
 import argparse
 
 
@@ -31,8 +33,15 @@ def build_parser():
 def main():
     parser = build_parser()
     args = parser.parse_args()
-    print(f"Scanning: {args.path}")
-    print(f"Recursive: {args.recursive}")
+
+    results = scan_path(args.path, recursive=args.recursive)
+
+    print_report(results)
+
+    if args.json:
+        export_json(results, args.json)
+    if args.csv:
+        export_csv(results, args.csv)
 
 
 if __name__ == "__main__":

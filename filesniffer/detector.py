@@ -1,3 +1,38 @@
+import unicodedata
+import re
+from pathlib import Path
+
+# Unicode characters that are visually similar to common ASCII chars
+# but could be used to disguise filenames or evade scanners.
+SUSPICIOUS_UNICODE_HIGH = {
+    '\u200b', #zero-width space (completely invisible)
+    '\u200c', #zero-width non-joiner
+    '\u200d', #zero-width joiner
+    '\u2060', #zero-width word joiner
+    '\ufeff', #byte order mark (BOM)
+    '\u2028', # line separator
+    '\u2029', # paragraph separator
+    '\u202e', # right-to-left override (can reverse text direction)
+    '\u202d', # left-to-right override
+    '\u202a', # left-to-right embedding
+    '\u202b', # right-to-left embedding
+    '\u2066', # left-to-right isolate
+    '\u2067', # right-to-left isolate
+    '\u2068', # first strong isolate
+    '\u2069', # pop directional isolate
+}
+
+SUSPICIOUS_UNICODE_INFO = {
+    '\u202f', # narrow no-break space (used in macOS screenshot filenames)
+    '\u00a0', # regular no-break space
+}
+
+# macOS screenshot filename pattern:
+# "Screenshot YYYY-MM-DD at H.MM.SS\u202fAM/PM.png"
+MACOS_SCREENSHOT_PATTERN = re.compile(
+    r"^Screenshot \d{4}-\d{2}-\d{2} at \d{1,2}\.\d{2}\.\d{2}\u202f(AM|PM)\.png$"
+)
+
 from filesniffer.signatures import(
     SIGNATURES,
     RIFF_SUBTYPE_OFFSET,
@@ -39,7 +74,8 @@ class DetectionResult:
         return (
             f"DetectionResult(filepath={self.filepath!r}, "
             f"possible_types={self.possible_types!r}, "
-            f"confidence={self.confidence!r})"
+            f"confidence={self.confidence!r}, "
+            f"note={self.note!r})"
         )
     
 def check_simple_signatures(header, signature_db):
@@ -120,42 +156,104 @@ def check_dmg_trailer(filepath):
     except (OSError, IOError):
         return False
 
+def normalize_path(filepath):
+    """
+    Normalize a filepath before scanning:
+    - Resolves ~ and relative paths to absolute
+    - Normalizes Unicode to NFC form for consistent comparison
+    - Detects and flags suspicious Unicode characters in the filename
+    """
+    path = Path(filepath).expanduser().resolve()
+    filename = path.name
+
+    # Normalize to NFC first
+    normalized = unicodedata.normalize("NFC", str(path))
+
+    # Check for high-severity Unicode characters — always suspicious
+    found_high = [ch for ch in filename if ch in SUSPICIOUS_UNICODE_HIGH]
+
+    # Check for info-level Unicode characters
+    found_info = [ch for ch in filename if ch in SUSPICIOUS_UNICODE_INFO]
+
+    warnings = []
+
+    if found_high:
+        char_descriptions = ', '.join(
+            f"U+{ord(ch):04X} ({unicodedata.name(ch, 'UNKNOWN')})"
+            for ch in found_high
+        )
+        warnings.append(f"SUSPICIOUS Unicode in filename: {char_descriptions}")
+
+    if found_info:
+        # Check if this matches the known macOS screenshot pattern
+        is_macos_screenshot = bool(MACOS_SCREENSHOT_PATTERN.match(filename))
+
+        if is_macos_screenshot:
+            # Only the expected \u202f is present — downgrade to info
+            char_descriptions = ', '.join(
+                f"U+{ord(ch):04X} ({unicodedata.name(ch, 'UNKNOWN')})"
+                for ch in found_info
+            )
+            warnings.append(f"INFO: Known macOS filename encoding: {char_descriptions}")
+        else:
+            # Same character, but not in an expected pattern — flag it
+            char_descriptions = ', '.join(
+                f"U+{ord(ch):04X} ({unicodedata.name(ch, 'UNKNOWN')})"
+                for ch in found_info
+            )
+            warnings.append(f"SUSPICIOUS Unicode in filename: {char_descriptions}")
+
+    warning = ' | '.join(warnings) if warnings else None
+    return normalized, warning
+
 def detect_file(filepath):
+    filepath, unicode_warning = normalize_path(filepath)
+
     header = read_header(filepath)
     if header is None:
-        return DetectionResult(filepath, [".unknown"], confidence="low", note="unreadable")
+        return DetectionResult(
+            filepath, [".unknown"], 
+            confidence="low", 
+            note=f"unreadable{' | ' + unicode_warning if unicode_warning else ''}"
+        )
 
     # 1. Try simple signatures first (fastest)
     matches = check_simple_signatures(header, SIGNATURES)
     if len(matches) == 1:
-        return DetectionResult(filepath, matches, confidence="high")
+        return DetectionResult(filepath, matches, confidence="high", note=unicode_warning)
     if len(matches) > 1:
-        return DetectionResult(filepath, matches, confidence="ambiguous")
+        return DetectionResult(filepath, matches, confidence="ambiguous", note=unicode_warning)
 
     # 2. Try deep signatures (files where magic bytes are far from the start)
     deep = check_deep_signatures(filepath)
     if deep:
-        return DetectionResult(filepath, deep, confidence="high")
+        return DetectionResult(filepath, deep, confidence="high", note=unicode_warning)
 
     #3. Resolve RIFF containers (WAV vs AVI)
     if header[:4] == b"RIFF":
         ext = resolve_riff(header)
         if ext:
-            return DetectionResult(filepath, [ext], confidence="high")
+            return DetectionResult(filepath, [ext], confidence="high", note=unicode_warning)
 
     # 4. Resolve EBML containers (MKV vs WebM)
     if header[:4] == b"\x1a\x45\xdf\xa3":
         ext = resolve_ebml(filepath)
         if ext:
-            return DetectionResult(filepath, [ext], confidence="high")
+            return DetectionResult(filepath, [ext], confidence="high", note=unicode_warning)
 
     # 5. EML heuristic
     if check_eml_heuristic(header):
-        return DetectionResult(filepath, [".eml"], confidence="low", note="heuristic match")
+        return DetectionResult(
+            filepath, [".eml"], confidence="low", 
+            note=f"heuristic match{' | ' + unicode_warning if unicode_warning else ''}"
+        )
 
     # 6. DMG trailer check
     if check_dmg_trailer(filepath):
-        return DetectionResult(filepath, [".dmg"], confidence="high")
-    
+        return DetectionResult(filepath, [".dmg"], confidence="high", note=unicode_warning)
+
     # 7. Nothing matched
-    return DetectionResult(filepath, [".unknown"], confidence="low", note="no signature matched")
+    return DetectionResult(
+        filepath, [".unknown"], confidence="low", 
+        note=f"no signature matched{' | ' + unicode_warning if unicode_warning else ''}"
+    )
