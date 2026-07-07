@@ -1,6 +1,21 @@
 import unicodedata
 import re
 from pathlib import Path
+from filesniffer.signatures import (
+    SIGNATURES,
+    RIFF_SUBTYPE_OFFSET,
+    RIFF_SUBTYPES,
+    EBML_DOCTYPE_ELEMENT_ID,
+    EBML_DOCTYPES,
+    EML_HEADER_MARKERS,
+    EML_HEURISTIC_THRESHOLD,
+    DMG_TRAILER_MAGIC,
+    DMG_TRAILER_OFFSET,
+    TEXT_SHEBANGS,
+    TEXT_OPENING_PATTERNS,
+    TEXT_PRINTABLE_THRESHOLD,
+    BENIGN_FILENAMES,
+)
 
 # Unicode characters that are visually similar to common ASCII chars
 # but could be used to disguise filenames or evade scanners.
@@ -31,18 +46,6 @@ SUSPICIOUS_UNICODE_INFO = {
 # "Screenshot YYYY-MM-DD at H.MM.SS\u202fAM/PM.png"
 MACOS_SCREENSHOT_PATTERN = re.compile(
     r"^Screenshot \d{4}-\d{2}-\d{2} at \d{1,2}\.\d{2}\.\d{2}\u202f(AM|PM)\.png$"
-)
-
-from filesniffer.signatures import(
-    SIGNATURES,
-    RIFF_SUBTYPE_OFFSET,
-    RIFF_SUBTYPES,
-    EBML_DOCTYPE_ELEMENT_ID,
-    EBML_DOCTYPES,
-    EML_HEADER_MARKERS,
-    EML_HEURISTIC_THRESHOLD,
-    DMG_TRAILER_MAGIC,
-    DMG_TRAILER_OFFSET,
 )
 
 def read_header(filepath, num_bytes=64):
@@ -156,6 +159,33 @@ def check_dmg_trailer(filepath):
     except (OSError, IOError):
         return False
 
+def check_text_heuristic(header):
+    """
+    Attempt to identify plain text files that have no binary magic bytes.
+    Checks shebangs first, then opening patterns, then falls back to
+    a printability ratio check.
+    Returns a tuple of (extension_or_none, confidence)
+    """
+    for shebang, ext in TEXT_SHEBANGS.items():
+        if header.startswith(shebang):
+            return ext, "high"
+
+
+    header_lower = header[:64].lower()   
+    for pattern, ext in TEXT_OPENING_PATTERNS.items():
+        if header_lower.startswith(pattern):
+            return ext, "high"
+        
+    printable = sum(
+        1 for byte in header
+        if 32 <= byte <= 126 or byte in (9, 10, 13)
+    )
+    ratio = printable / len(header) if header else 0
+    if ratio >= TEXT_PRINTABLE_THRESHOLD:
+        return "likely text", "low"
+    
+    return None, None
+
 def normalize_path(filepath):
     """
     Normalize a filepath before scanning:
@@ -168,6 +198,10 @@ def normalize_path(filepath):
 
     # Normalize to NFC first
     normalized = unicodedata.normalize("NFC", str(path))
+
+    # Check against known benign filenames before Unicode inspection
+    if filename.lower() in BENIGN_FILENAMES:
+        return normalized, None
 
     # Check for high-severity Unicode characters — always suspicious
     found_high = [ch for ch in filename if ch in SUSPICIOUS_UNICODE_HIGH]
@@ -252,7 +286,19 @@ def detect_file(filepath):
     if check_dmg_trailer(filepath):
         return DetectionResult(filepath, [".dmg"], confidence="high", note=unicode_warning)
 
-    # 7. Nothing matched
+    # 7. Text file heuristic
+    text_ext, text_confidence = check_text_heuristic(header)
+    if text_ext:
+        note = unicode_warning
+        if text_ext == "likely text":
+            note = f"likely plain text file{' | ' + unicode_warning if unicode_warning else ''}"
+        return DetectionResult(
+            filepath, [text_ext],
+            confidence=text_confidence,
+            note=note
+        )
+
+    # 8. Nothing matched
     return DetectionResult(
         filepath, [".unknown"], confidence="low", 
         note=f"no signature matched{' | ' + unicode_warning if unicode_warning else ''}"

@@ -29,6 +29,34 @@ SIGNATURES: dict[str, list[tuple[int, bytes]]] = {
     # === Databases ===
     ".sqlite": [(0, b"SQLite format 3\x00")],
     ".db":     [(0, b"SQLite format 3\x00")],
+    # === Exexcutables ===
+    ".exe": [(0, b"MZ")],
+    ".elf": [(0, b"\x7fELF")],
+    ".dex": [(0, b"dex\n035\x00"), (0, b"dex\n036\x00"), (0, b"dex\n037\x00")],
+    ".macho":  [(0, b"\xfe\xed\xfa\xce"),  # big-endian 32-bit
+                (0, b"\xfe\xed\xfa\xcf"),  # big-endian 64-bit
+                (0, b"\xcf\xfa\xed\xfe"),  # little-endian (Apple Silicon/modern Intel)
+                (0, b"\xce\xfa\xed\xfe")], # little-endian 32-bit
+    ".machofat": [(0, b"\xca\xfe\xba\xbe")], # universal/fat binary
+
+    # === Network Captures ===
+    ".pcap":  [(0, b"\xd4\xc3\xb2\xa1"), 
+            (0, b"\xa1\xb2\xc3\xd4")],
+    ".pcapng": [(0, b"\x0a\x0d\x0d\x0a")],
+
+    # === Forensics Images ===
+    ".e01": [(0, b"EVF\x01")],
+
+    # === Virtual Machine Disk ===
+    ".vmdk": [(0, b"KDMV")],
+
+    # === Additional Archives ===
+    ".tar":  [(257, b"ustar")],
+    ".gz":   [(0, b"\x1f\x8b")],
+    ".bz2":  [(0, b"BZh")],
+    ".xz":   [(0, b"\xfd7zXZ\x00")],
+    ".7z":   [(0, b"7z\xbc\xaf\x27\x1c")],
+    ".rar":  [(0, b"Rar!\x1a\x07\x00"), (0, b"Rar!\x1a\x07\x01\x00")],    
     # === Email ===
     ".pst": [(0, b"!BDN")],
 }
@@ -89,4 +117,65 @@ EBML_DOCTYPE_ELEMENT_ID = b"\x42\x82"
 EBML_DOCTYPES = {
     b"matroska": ".mkv",
     b"webm": ".webm",
+}
+
+# === Text file heuristics ===
+# Plain text files have no binary magic bytes — detection requires
+# reading the file as text and checking for known patterns.
+# Handled by check_text_heuristic() in detector.py.
+
+TEXT_SHEBANGS = {
+    b"#!/usr/bin/env python":  ".py",
+    b"#!/usr/bin/python":      ".py",
+    b"#!/usr/bin/env node":    ".js",
+    b"#!/usr/bin/env ruby":    ".rb",
+    b"#!/usr/bin/env bash":    ".sh",
+    b"#!/bin/bash":            ".sh",
+    b"#!/bin/sh":              ".sh",
+    b"#!/usr/bin/env perl":    ".pl",
+}
+
+TEXT_OPENING_PATTERNS = {
+    b"<!DOCTYPE html>": ".html",
+    b"<html>":          ".html",
+    b"<?xml":           ".xml",
+    b"{\n":    ".json",   # JSON object with newline (common formatting)
+    b"[\n":    ".json",   # JSON array with newline
+    b"{\r\n":  ".json",   # Windows line endings
+    b"[\r\n":  ".json",   # Windows line endings
+    b"<?php":          ".php",
+    b"<!doctype html": ".html",
+}
+
+# If 85%+ of the first 512 bytes are printable ASCII,
+# treat the file as plain text with low confidence.
+TEXT_PRINTABLE_THRESHOLD = 0.85
+
+# === Known benign filenames ===
+# These files are expected to return .unknown and should not
+# be flagged as suspicious — they are legitimate system files
+# with no standard magic byte signature.
+BENIGN_FILENAMES = {
+    # Windows system files
+    "desktop.ini",
+    "thumbs.db",
+    "ntldr",
+    "bootmgr",
+    # macOS system files
+    ".ds_store",
+    ".localized",
+    # Linux/Unix dotfiles
+    ".bashrc",
+    ".zshrc",
+    ".profile",
+    ".bash_profile",
+    ".bash_history",
+    ".gitignore",
+    ".gitconfig",
+    ".editorconfig",
+    # Common text config files with no extension
+    "makefile",
+    "dockerfile",
+    "vagrantfile",
+    "procfile",
 }
